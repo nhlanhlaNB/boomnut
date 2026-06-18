@@ -1,0 +1,137 @@
+import { NextRequest, NextResponse } from 'next/server';
+
+// Azure AI Projects configuration
+const AZURE_AI_ENDPOINT =
+  process.env.AZURE_PROJECT_ENDPOINT ||
+  process.env.AZURE_AI_ENDPOINT ||
+  'https://redcow-resource.services.ai.azure.com/api/projects/redcow';
+const AZURE_API_KEY = process.env.AZURE_PROJECT_API_KEY;
+const AGENT_NAME = process.env.AZURE_AGENT_NAME || 'spark-e-tutor';
+const MODEL_DEPLOYMENT = process.env.AZURE_MODEL_DEPLOYMENT || 'gpt-4o';
+
+export async function POST(request: NextRequest) {
+  try {
+    const { messages, subject, uploadedFiles, image, language = 'en', mode = 'tutor' } = await request.json();
+
+    // Build system instructions based on mode and subject
+    const instructions = getInstructions(mode, subject, language, uploadedFiles);
+
+    if (!AZURE_API_KEY) {
+      return NextResponse.json(
+        { error: 'Azure AI Project API key not configured' },
+        { status: 500 }
+      );
+    }
+
+    // Format messages for Azure AI
+    const formattedMessages = [
+      { role: 'system', content: instructions },
+      ...messages,
+    ];
+
+    // Add image if provided
+    if (image) {
+      const lastMessage = formattedMessages[formattedMessages.length - 1];
+      formattedMessages[formattedMessages.length - 1] = {
+        role: lastMessage.role,
+        content: [
+          { type: 'text', text: lastMessage.content },
+          { type: 'image_url', image_url: { url: image } },
+        ],
+      };
+    }
+
+    // Call Azure AI Agent
+    const response = await fetch(`${AZURE_AI_ENDPOINT}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'api-key': AZURE_API_KEY,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        messages: formattedMessages,
+        agent: {
+          name: AGENT_NAME,
+          type: 'agent_reference',
+        },
+        max_completion_tokens: 2000,
+      }),
+    });
+
+    if (!response.ok) {
+      const error = await response.text();
+      throw new Error(`Azure AI API error: ${error}`);
+    }
+
+    const data = await response.json();
+    const assistantMessage = data.choices?.[0]?.message?.content || 'Sorry, I could not generate a response.';
+
+    return NextResponse.json({
+      message: assistantMessage,
+      usage: data.usage,
+    });
+
+  } catch (error: any) {
+    console.error('Azure AI Agent error:', error);
+
+    return NextResponse.json(
+      { error: error.message || 'Azure AI request failed' },
+      { status: 500 }
+    );
+  }
+}
+
+function getInstructions(
+  mode: string,
+  subject: string,
+  language: string,
+  uploadedFiles?: string[]
+): string {
+  const baseInstructions = {
+    tutor: `You are Spark.E, an expert AI tutor specializing in ${subject}. Your role is to:
+- Explain concepts clearly and patiently
+- Break down complex topics into understandable parts
+- Provide examples and analogies
+- Ask questions to check understanding
+- Encourage critical thinking
+- Adapt your teaching style to the student's level
+- Be supportive and encouraging
+- Grade essays and assignments with constructive feedback
+${language !== 'en' ? `- Respond in ${language} language` : ''}`,
+
+    flashcard: `You are a flashcard generation specialist for ${subject}. Create effective flashcards that:
+- Focus on key concepts and definitions
+- Use clear, concise language
+- Include memory aids when helpful
+- Follow spaced repetition principles
+- Format as JSON: [{"front": "question", "back": "answer"}]`,
+
+    quiz: `You are a quiz generation expert for ${subject}. Create educational quizzes that:
+- Test understanding, not just memorization
+- Include multiple choice questions
+- Provide difficulty levels
+- Give explanations for correct answers
+- Format as JSON with questions, options, and correct answers`,
+
+    guide: `You are a study guide specialist for ${subject}. Create comprehensive study guides that:
+- Organize information hierarchically
+- Highlight key concepts and definitions
+- Include examples and applications
+- Suggest learning strategies
+- Structure content for maximum retention`,
+
+    summarize: `You are a content summarization expert for ${subject}. Create summaries that:
+- Capture main ideas and key points
+- Maintain logical flow and structure
+- Use clear, accessible language
+- Preserve important details`,
+  };
+
+  let instructions = baseInstructions[mode as keyof typeof baseInstructions] || baseInstructions.tutor;
+
+  if (uploadedFiles && uploadedFiles.length > 0) {
+    instructions += `\n\nThe student has uploaded study materials: ${uploadedFiles.join(', ')}. Reference these materials when answering questions.`;
+  }
+
+  return instructions;
+}
